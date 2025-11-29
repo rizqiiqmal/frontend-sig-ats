@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Leaflet Express MongoDB Demo</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
+    <style>
+        #mapid { height: 100vh; width: 100%; }
+        body { margin: 0; padding: 0; font-family: sans-serif; }
+        /* Style untuk form di dalam pop-up */
+        .form-popup label { display: block; margin-top: 5px; font-weight: bold; }
+        .form-popup input[type="text"], .form-popup textarea { width: 90%; padding: 5px; margin-top: 2px; margin-bottom: 10px; border: 1px solid #ccc; border-radius: 3px; }
+        .form-popup button { padding: 8px 15px; margin-right: 5px; border: none; border-radius: 5px; cursor: pointer; }
+        .btn-save { background-color: #0078A8; color: white; }
+        .btn-delete { background-color: #dc3545; color: white; }
+        .btn-cancel { background-color: #6c757d; color: white; }
+        .data-popup hr { margin: 8px 0; }
+        .data-popup h3 { margin-top: 0; }
+    </style>
+</head>
+<body>
+    <div id="mapid"></div>
+
+    <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+    <script>
+        const API_URL = 'http://localhost:5000/api/locations';
+        var map = L.map('mapid').setView([-6.2088, 106.8456], 13);
+        let tempMarker = null; 
+        let activeMarkers = {}; // Objek untuk menyimpan referensi marker berdasarkan ID MongoDB
+
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            maxZoom: 19,
+            attribution: '© OpenStreetMap contributors'
+        }).addTo(map);
+        
+        // --- Fungsi Utama Front-End ---
+
+        // Fungsi yang menjalankan penghapusan di Back-End
+        async function performDelete(id) {
+            try {
+                const response = await fetch(`${API_URL}/${id}`, {
+                    method: 'DELETE',
+                });
+
+                if (response.ok) {
+                    console.log('Location deleted successfully');
+                    
+                    // Hapus marker dari peta menggunakan referensi dari activeMarkers
+                    if (activeMarkers[id]) {
+                        map.removeLayer(activeMarkers[id]);
+                        delete activeMarkers[id];
+                    }
+                } else {
+                    throw new Error('Server returned an error');
+                }
+            } catch (error) {
+                console.error('Error deleting location:', error);
+                alert('Gagal menghapus lokasi dari server.');
+            }
+        }
+        
+        // Fungsi yang menampilkan pop-up konfirmasi (menggantikan alert)
+        function deleteLocation(id) {
+            const marker = activeMarkers[id];
+            if (!marker) return;
+
+            // Konten konfirmasi dengan dua tombol
+            const confirmationHtml = `
+                <div class="data-popup">
+                    <p style="font-weight: bold;">Apakah Anda yakin ingin menghapus lokasi ini?</p>
+                    <button class="btn-delete" onclick="performDelete('${id}'); map.closePopup();">Ya, Hapus</button>
+                    <button class="btn-cancel" onclick="map.closePopup();">Batalkan</button>
+                </div>
+            `;
+            
+            // Rebind pop-up dengan konten konfirmasi dan buka
+            marker.setPopupContent(confirmationHtml).openPopup();
+        }
+
+
+        // Fungsi Simpan Lokasi (POST)
+        async function saveLocation(lat, lng, name, description, marker) {
+            try {
+                const response = await fetch(API_URL, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({ 
+                        name: name, 
+                        description: description, 
+                        latitude: lat, 
+                        longitude: lng 
+                    }),
+                });
+
+                if (response.ok) {
+                    console.log(`Lokasi '${name}' berhasil disimpan.`);
+                    // Tutup pop-up dan hapus temporary marker
+                    map.closePopup();
+                    map.removeLayer(marker); 
+                    tempMarker = null;
+                    // Muat ulang data untuk menampilkan marker baru secara permanen
+                    loadData(); 
+                } else {
+                    throw new Error('Server returned an error');
+                }
+            } catch (error) {
+                console.error('Error posting new location:', error);
+                alert('Gagal menyimpan lokasi baru ke server.');
+            }
+        }
+
+
+        // Fungsi Muat Data (GET)
+        async function loadData() {
+            map.eachLayer(function (layer) {
+                if (layer instanceof L.Marker && layer !== tempMarker) {
+                    map.removeLayer(layer);
+                }
+            });
+            activeMarkers = {}; 
+            
+            try {
+                const response = await fetch(API_URL); 
+                if (!response.ok) {
+                    throw new Error('Failed to fetch locations from server'); 
+                }
+                const locations = await response.json();
+
+                locations.forEach(loc => {
+                    const marker = L.marker([loc.latitude, loc.longitude]).addTo(map);
+                    
+                    activeMarkers[loc._id] = marker; 
+                    
+                    // Konten pop-up data
+                    const dataPopup = `
+                        <div class="data-popup">
+                            <h3>${loc.name}</h3>
+                            <p>${loc.description || '<i>Tidak ada deskripsi</i>'}</p>
+                            <hr>
+                            <small>Lat: ${loc.latitude.toFixed(6)}, Lng: ${loc.longitude.toFixed(6)}</small>
+                            <hr>
+                            <button class="btn-delete" onclick="deleteLocation('${loc._id}')">Hapus Lokasi</button>
+                        </div>
+                    `;
+                    marker.bindPopup(dataPopup);
+                });
+                
+                if (locations.length > 0 && !tempMarker) {
+                    map.setView([locations[0].latitude, locations[0].longitude], 13);
+                }
+                
+            } catch (error) {
+                console.error('Error loading data:', error);
+            }
+        }
+
+        // Listener klik peta: Munculkan Pop-up Form
+        map.on('click', function(e) {
+            const lat = e.latlng.lat;
+            const lng = e.latlng.lng;
+            
+            if (tempMarker) {
+                map.removeLayer(tempMarker);
+            }
+
+            const formHtml = `
+                <div class="form-popup">
+                    <h3>Tambah Lokasi Baru</h3>
+                    <form onsubmit="event.preventDefault(); 
+                        const name = document.getElementById('loc_name').value;
+                        const desc = document.getElementById('loc_desc').value;
+                        saveLocation(${lat}, ${lng}, name, desc, tempMarker);
+                        return false;">
+                        
+                        <label>Koordinat</label>
+                        <input type="text" value="Lat: ${lat.toFixed(6)}, Lng: ${lng.toFixed(6)}" readonly>
+
+                        <label for="loc_name">Nama Lokasi *</label>
+                        <input type="text" id="loc_name" required>
+
+                        <label for="loc_desc">Deskripsi</label>
+                        <textarea id="loc_desc"></textarea>
+
+                        <button type="submit" class="btn-save">Simpan Lokasi</button>
+                    </form>
+                </div>
+            `;
+            
+            tempMarker = L.marker([lat, lng]).addTo(map);
+            tempMarker.bindPopup(formHtml).openPopup();
+
+            tempMarker.on('popupclose', function() {
+                map.removeLayer(tempMarker);
+                tempMarker = null;
+            });
+        });
+
+
+        loadData();
+    </script>
+</body>
+</html>
